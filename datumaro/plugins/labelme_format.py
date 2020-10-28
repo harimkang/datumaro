@@ -4,6 +4,7 @@
 
 from collections import defaultdict
 from defusedxml import ElementTree
+from glob import glob
 import logging as log
 import numpy as np
 import os
@@ -38,9 +39,7 @@ class LabelMeExtractor(SourceExtractor):
         }
 
         items = []
-        for p in os.listdir(path):
-            if not p.endswith('.xml'):
-                continue
+        for p in glob(osp.join(path, '**', '*.xml'), recursive=True):
             root = ElementTree.parse(osp.join(path, p))
 
             item_id = osp.join(root.find('folder').text or '',
@@ -222,29 +221,17 @@ class LabelMeExtractor(SourceExtractor):
 
 
 class LabelMeImporter(Importer):
-    EXTRACTOR = 'label_me'
-
     @classmethod
     def find_sources(cls, path):
-        subset_paths = []
         if not osp.isdir(path):
             return []
 
-        path = osp.normpath(path)
-
         def has_annotations(d):
-            return len([p for p in os.listdir(d) if p.endswith('.xml')]) != 0
+            return len(glob(osp.join(d, '**', '*.xml'), recursive=True)) != 0
 
+        subset_paths = []
         if has_annotations(path):
-            subset_paths.append({'url': path, 'format': cls.EXTRACTOR})
-        else:
-            for d in os.listdir(path):
-                subset = d
-                d = osp.join(path, d)
-                if osp.isdir(d) and has_annotations(d):
-                    subset_paths.append({'url': d, 'format': cls.EXTRACTOR,
-                        'options': {'subset_name': subset}
-                    })
+            subset_paths.append({'url': path, 'format': 'label_me'})
         return subset_paths
 
 
@@ -252,14 +239,16 @@ class LabelMeConverter(Converter):
     DEFAULT_IMAGE_EXT = LabelMePath.IMAGE_EXT
 
     def apply(self):
-        for subset_name, subset in self._extractor.subsets().items():
-            subset_dir = osp.join(self._save_dir, subset_name)
-            os.makedirs(subset_dir, exist_ok=True)
-            os.makedirs(osp.join(subset_dir, LabelMePath.MASKS_DIR),
-                exist_ok=True)
+        if 1 < len(self._extractor.subsets()):
+            log.warning("LabelMe format can't save subset information, "
+                "the dataset will be exported as a single subset.")
 
-            for index, item in enumerate(subset):
-                self._save_item(item, subset_dir, index)
+        subset_dir = self._save_dir
+        os.makedirs(subset_dir, exist_ok=True)
+        os.makedirs(osp.join(subset_dir, LabelMePath.MASKS_DIR), exist_ok=True)
+
+        for index, item in enumerate(subset):
+            self._save_item(item, subset_dir, index)
 
     def _get_label(self, label_id):
         if label_id is None:
@@ -339,8 +328,7 @@ class LabelMeConverter(Converter):
                 ET.SubElement(poly_elem, 'username').text = \
                     str(ann.attributes.pop('username', ''))
             elif ann.type == AnnotationType.mask:
-                mask_filename = '%s_mask_%s.png' % \
-                    (item.id.replace('/', '_'), obj_id)
+                mask_filename = '%s_mask_%s.png' % (item.id, obj_id)
                 save_image(osp.join(subset_dir, LabelMePath.MASKS_DIR,
                         mask_filename),
                     self._paint_mask(ann.image))
