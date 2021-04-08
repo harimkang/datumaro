@@ -12,7 +12,7 @@ CocoTask = Enum('CocoTask', [
     'captions',
     'labels', # extension, does not exist in the original COCO format
     'image_info',
-    # 'panoptic',
+    'panoptic',
     # 'stuff',
 ])
 
@@ -21,3 +21,6 @@ class CocoPath:
     ANNOTATIONS_DIR = 'annotations'
 
     IMAGE_EXT = '.jpg'
+    PANOPTIC_EXT = '.png'
+
+    LABELMAP_FILE = 'panoptic_coco_categories.json'

@@ -13,9 +13,10 @@ import pycocotools.mask as mask_utils
 from datumaro.components.extractor import (SourceExtractor,
     DEFAULT_SUBSET_NAME, DatasetItem,
     AnnotationType, Label, RleMask, Points, Polygon, Bbox, Caption,
-    LabelCategories, PointsCategories
+    LabelCategories, PointsCategories, MaskCategories
 )
 from datumaro.util.image import Image
+from datumaro.util.mask_tools import generate_colormap
 
 from .format import CocoTask, CocoPath
 
@@ -42,9 +43,17 @@ class _CocoExtractor(SourceExtractor):
 
         self._merge_instance_polygons = merge_instance_polygons
 
-        loader = self._make_subset_loader(path)
-        self._load_categories(loader)
-        self._items = list(self._load_items(loader).values())
+        if self._task == CocoTask.panoptic:
+            #panoptic is not added to pycocotools
+            panoptic_config = self._load_panoptic_config(path)
+            panoptic_images = osp.splitext(path)[0]
+
+            self._load_panoptic_categories(panoptic_config, rootpath)
+            self._items = list(self._load_panoptic_items(panoptic_config, panoptic_images).values())
+        else:
+            loader = self._make_subset_loader(path)
+            self._load_categories(loader)
+            self._items = list(self._load_items(loader).values())
 
     @staticmethod
     def _make_subset_loader(path):
@@ -62,8 +71,8 @@ class _CocoExtractor(SourceExtractor):
         self._categories = {}
 
         if self._task in [CocoTask.instances, CocoTask.labels,
-                CocoTask.person_keypoints,
-                # TODO: Task.stuff, CocoTask.panoptic
+                CocoTask.person_keypoints
+                # TODO: Task.stuff
                 ]:
             label_categories, label_map = self._load_label_categories(loader)
             self._categories[AnnotationType.label] = label_categories
@@ -100,6 +109,34 @@ class _CocoExtractor(SourceExtractor):
 
         return categories
 
+    @staticmethod
+    def _load_panoptic_config(path):
+        with open(path, 'r') as f:
+            import json
+            return json.load(f)
+
+    def _load_panoptic_categories(self, config, root_path):
+        label_categories = LabelCategories()
+        label_map = {}
+        for idx, cat in enumerate(config['categories']):
+            label_map[cat['id']] = idx
+            label_categories.add(name=cat['name'], parent=cat.get('supercategory'))
+
+        labelmap_file = osp.join(root_path, CocoPath.ANNOTATIONS_DIR, CocoPath.LABELMAP_FILE)
+        if osp.isfile(labelmap_file):
+            with open(labelmap_file, 'r') as f:
+                import json
+                labelmap = json.load(f)
+            colormap = {cat['id']: (cat['color'][0], cat['color'][1], cat['color'][2]) for cat in labelmap}
+        else:
+            max_cat_id = max([idx['id'] for idx in config['categories']])
+            colormap = generate_colormap(max_cat_id+1)
+        mask_categories = MaskCategories(colormap)
+
+        self._categories[AnnotationType.label] = label_categories
+        self._categories[AnnotationType.mask] = mask_categories
+        self._label_map = label_map
+
     def _load_items(self, loader):
         items = OrderedDict()
 
@@ -122,6 +159,55 @@ class _CocoExtractor(SourceExtractor):
                 subset=self._subset, image=image, annotations=anns,
                 attributes={'id': img_id})
 
+        return items
+
+    def _load_panoptic_items(self, config, panoptic_images):
+        import numpy as np
+        import PIL.Image
+        from collections import defaultdict
+        items = OrderedDict()
+
+        def rgb2id(color):
+            if isinstance(color, np.ndarray) and len(color.shape) == 3:
+                if color.dtype == np.uint8:
+                    color = color.astype(np.int32)
+                return color[:, :, 0] + 256 * color[:, :, 1] + 256 * 256 * color[:, :, 2]
+            return int(color[0] + 256 * color[1] + 256 * 256 * color[2])
+
+        imgs_info = {}
+        for img in config['images']:
+            imgs_info[img['id']] = img
+
+        for ann in config['annotations']:
+            img_id = ann['image_id']
+            image_path = osp.join(self._images_dir, imgs_info[img_id]['file_name'])
+            image_size = (imgs_info[img_id].get('height'), imgs_info[img_id].get('width'))
+            image = Image(path=image_path, size=image_size)
+            anns = list()
+
+            panoptic_image_path = osp.join(panoptic_images, ann['file_name'])
+            panoptic_format = np.array(PIL.Image.open(panoptic_image_path), dtype=np.uint32)
+            pan = rgb2id(panoptic_format)
+            rle_per_category = defaultdict(list)
+            for segm_info in ann['segments_info']:
+                cat_id = segm_info['category_id']
+                segm_id = segm_info['id']
+                mask = pan == segm_id
+                rle = mask_utils.encode(np.asfortranarray(mask.astype('uint8')))
+                rle['counts'] = rle['counts'].decode('utf8')
+                rle_per_category[cat_id].append(rle)
+
+            for cat_id, rle_list in rle_per_category.items():
+                rle = mask_utils.merge(rle_list)
+                attributes = {}
+                attributes['bbox'] = list(mask_utils.toBbox(rle))
+                attributes['area'] = int(mask_utils.area(rle))
+                attributes['iscrowd'] = 0
+                anns.append(RleMask(rle=rle, label=cat_id, id=cat_id, attributes=attributes))
+
+            items[img_id] = DatasetItem(
+                id=img_id, subset=self._subset, image=image, annotations=anns,
+                attributes={'id': img_id})
         return items
 
     def _get_label_id(self, ann):
@@ -249,4 +335,9 @@ class CocoPersonKeypointsExtractor(_CocoExtractor):
 class CocoLabelsExtractor(_CocoExtractor):
     def __init__(self, path, **kwargs):
         kwargs['task'] = CocoTask.labels
+        super().__init__(path, **kwargs)
+
+class CocoPanopticExtractor(_CocoExtractor):
+    def __init__(self, path, **kwargs):
+        kwargs['task'] = CocoTask.panoptic
         super().__init__(path, **kwargs)

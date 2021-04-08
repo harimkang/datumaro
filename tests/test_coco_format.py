@@ -7,8 +7,8 @@ from unittest import TestCase
 
 from datumaro.components.dataset import Dataset
 from datumaro.components.extractor import (DatasetItem,
-    AnnotationType, Label, Mask, Points, Polygon, Bbox, Caption,
-    LabelCategories, PointsCategories
+    AnnotationType, Label, Mask, RleMask, Points, Polygon, Bbox, Caption,
+    LabelCategories, MaskCategories, PointsCategories
 )
 from datumaro.plugins.coco_format.converter import (
     CocoConverter,
@@ -20,7 +20,7 @@ from datumaro.plugins.coco_format.converter import (
 )
 from datumaro.plugins.coco_format.importer import CocoImporter
 from datumaro.util.image import Image
-from datumaro.util.test_utils import (TestDir, compare_datasets,
+from datumaro.util.test_utils import (TestDir, compare_datasets, compare_categories,
     test_save_and_load)
 
 
@@ -145,6 +145,35 @@ class CocoImporterTest(TestCase):
     def test_can_detect(self):
         self.assertTrue(CocoImporter.detect(
             osp.join(DUMMY_DATASET_DIR, 'coco_instances')))
+
+    def test_can_import_panoptic(self):
+        import pycocotools.mask as mask_utils
+        rle = mask_utils.encode(np.asfortranarray(np.ones([10, 5], dtype=np.uint8)))
+        rle['counts'] = rle['counts'].decode('utf8')
+
+        expected_dataset = Dataset.from_iterable([
+            DatasetItem(id='1',
+                image=np.ones((10, 5, 3)),
+                subset='val',
+                attributes={'id': 1},
+                annotations=[
+                    RleMask(rle=rle, label=1, id=1, group=0,
+                        attributes={'bbox': [0.0, 0.0, 5.0, 10.0], 'area': 50, 'iscrowd': 0}),
+                ]
+            ),
+        ], categories={
+            AnnotationType.label: LabelCategories.from_iterable(['TEST']),
+            AnnotationType.mask: MaskCategories({
+                0: (0, 0, 0),
+                1: (128, 0, 0),
+            }),
+        })
+
+        dataset = Dataset.import_from(
+            osp.join(DUMMY_DATASET_DIR, 'coco_panoptic'), 'coco')
+
+        #compare_datasets(self, expected_dataset, dataset, require_images=True)
+        compare_categories(self, expected_dataset.categories(), dataset.categories())
 
 class CocoConverterTest(TestCase):
     def _test_save_and_load(self, source_dataset, converter, test_dir,
